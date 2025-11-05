@@ -1,6 +1,5 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
-import sqlite3
 import base64
 import hashlib
 from datetime import datetime
@@ -14,30 +13,53 @@ except Exception as e:
     oracledb = None
 
 def listen_logout(conn, app_ref):
+    cur = None
     try:
         cur = conn.cursor()
         cur.callproc('DBMS_ALERT.REGISTER', ['LOGOUT_ALERT_LOCB2'])
+        # vòng chờ ngắn để phản hồi nhanh (2s thay vì 10s)
         while not app_ref._stop_listener:
-            result = cur.callproc('DBMS_ALERT.WAITONE', ['LOGOUT_ALERT_LOCB2', '', 0, 10])
-            channel, message, status, timeout = result
+            try:
+                channel, message, status, timeout = cur.callproc(
+                    'DBMS_ALERT.WAITONE',
+                    ['LOGOUT_ALERT_LOCB2', '', 0, 2]
+                )
+            except Exception:
+                break
 
-            # Nếu chính phiên này đang tự logout thì bỏ qua
+            # nếu chính phiên này đang tự logout -> dừng listener
             if app_ref._is_local_logout:
                 break
 
             if message == 'LOGOUT_NOW':
+                # TẤT CẢ thao tác UI phải đưa về main thread (Tkinter không thread-safe)
+                def _do_ui_logout():
+                    try:
+                        if app_ref.conn:
+                            app_ref.conn.close()
+                    except Exception:
+                        pass
+                    app_ref.conn = None
+                    app_ref.current_user = None
+                    app_ref._stop_listener = True
+                    app_ref._build_login_frame()
+                    messagebox.showwarning("Session ended",
+                                           "Bị đăng xuất do phiên khác logout.")
                 try:
-                    app_ref.conn.close()
+                    app_ref.after(0, _do_ui_logout)
+                except Exception:
+                    _do_ui_logout()
+                break
+    finally:
+        try:
+            if cur:
+                try:
+                    cur.callproc('DBMS_ALERT.UNREGISTER', ['LOGOUT_ALERT_LOCB2'])
                 except Exception:
                     pass
-                app_ref.conn = None
-                app_ref.current_user = None
-                app_ref._stop_listener = True
-                app_ref._build_login_frame()
-                messagebox.showwarning("Session ended", "Bị đăng xuất do phiên khác logout.")
-                break
-    except Exception:
-        pass
+                cur.close()
+        except Exception:
+            pass
 
 
 # --------------------- Application-level "encryption" ---------------------
@@ -93,39 +115,23 @@ def build_oracle_username(app_username: str) -> str:
 	return uname
 
 def build_oracle_password(app_password: str) -> str:
-	"""
-	Ptmp = enc_add_char(password)
-	P′   = SHA256(Ptmp) -> hex 64 ký tự
-	(Oracle sẽ tiếp tục hash nội bộ. Nếu DB bật policy phức tạp, sẽ bọc thêm ở bước sau.)
-	"""
-	enc = enc_add_char(app_password)
-	return hashlib.sha256(enc.encode("latin-1", errors="strict")).hexdigest()
+    """
+    Ptmp = enc_add_char(password)
+    H    = SHA256(Ptmp).hexdigest()  # 64 hex
+    P'   = rút gọn để tương thích Oracle cũ (≤ 30 ký tự).
+    Nếu DB bật policy phức tạp, thêm 'Aa!' cho đủ loại ký tự (tổng = 30).
+    """
+    enc = enc_add_char(app_password)
+    h = hashlib.sha256(enc.encode("latin-1", errors="strict")).hexdigest()  # 64 hex
+    # Giữ tương thích tối đa: 30 ký tự
+    base = h[:27]            # 27 hex đầu
+    pw = base + "Aa!"        # thêm để qua policy (hoa/thường/đặc biệt) => 30 ký tự
+    return pw
+
 
 def build_oracle_credentials(app_username: str, app_password: str):
 	"""Trả về (U′, P′) để dùng cho CREATE USER / đăng nhập."""
 	return build_oracle_username(app_username), build_oracle_password(app_password)
-
-# ------------------------- Local audit storage ----------------------------
-def init_local_store():
-    conn = sqlite3.connect("app_users.db")
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS app_users (
-            username TEXT PRIMARY KEY,
-            enc_password TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-def store_user_locally(username: str, enc_pw: str):
-    conn = sqlite3.connect("app_users.db")
-    cur = conn.cursor()
-    cur.execute("INSERT OR REPLACE INTO app_users (username, enc_password, created_at) VALUES (?, ?, ?)",
-                (username, enc_pw, datetime.utcnow().isoformat()))
-    conn.commit()
-    conn.close()
 
 # ------------------------- Oracle helpers --------------------------------
 def make_connection(user, password, host, port, sid, use_sysdba=False):
@@ -154,6 +160,13 @@ def create_user_and_grant(conn, new_user, new_password,
         cur.execute(f"GRANT CREATE SESSION TO {new_user_u}")
     except Exception:
         cur.execute(f"GRANT CONNECT TO {new_user_u}")
+
+    # <-- added: grant EXECUTE on SYS.DBMS_ALERT so app can SIGNAL/WAIT if needed
+    try:
+        cur.execute(f'GRANT EXECUTE ON SYS.DBMS_ALERT TO {new_user_u}')
+    except Exception as e:
+        # non-fatal, log for troubleshooting
+        print(f"⚠️ Không thể cấp EXECUTE trên SYS.DBMS_ALERT cho {new_user_u}: {e}")
 
     # 3️ Cấp quyền SELECT toàn bộ bảng của LOCB2
     cur.execute("SELECT table_name FROM all_tables WHERE owner = :own", {"own": owner_u})
@@ -430,9 +443,7 @@ class OracleApp(tk.Tk):
                                                default_tbs=v_def_tbs.get().strip() or "USERS",
                                                temp_tbs=v_tmp_tbs.get().strip() or "TEMP",
                                                quota_mb=int(v_quota.get()))
-                # keep existing local store behavior (application-level simple_encrypt)
-                enc = simple_encrypt(new_pw)
-                store_user_locally(new_user, enc)
+                
                 messagebox.showinfo("Success",
                                     f"User '{new_user}' created (Oracle user: {oracle_uname}).\n"
                                     f"Granted SELECT on {len(tables)} tables of schema {v_schema.get().strip().upper()}.")
@@ -465,6 +476,5 @@ class OracleApp(tk.Tk):
 
 # ------------------------------- MAIN -------------------------------------
 if __name__ == "__main__":
-    init_local_store()
     app = OracleApp()
     app.mainloop()
