@@ -276,6 +276,14 @@ class OracleApp(tk.Tk):
         ttk.Button(top, text="Register new user", command=self._open_register_dialog).pack(side="left", padx=10)
         ttk.Button(top, text="Logout", command=self._logout).pack(side="right")
 
+        # --- Thanh nút chức năng sau khi đăng nhập ---
+        actions = ttk.Frame(self, padding=(10, 0))
+        actions.pack(fill="x")
+
+        ttk.Button(actions, text="Load data", command=self._show_load_data_form).pack(side="left", padx=6)
+        ttk.Button(actions, text="Add data", command=lambda: messagebox.showinfo("Coming soon", "Tính năng Add data sẽ có sau.")).pack(side="left", padx=6)
+        ttk.Button(actions, text="Mã hóa tập tin", command=lambda: messagebox.showinfo("Coming soon", "Tính năng mã hóa tập tin sẽ có sau.")).pack(side="left", padx=6)
+
         mid = ttk.Frame(self, padding=10)
         mid.pack(fill="x")
         ttk.Label(mid, text="Choose table:").pack(side="left")
@@ -308,7 +316,8 @@ class OracleApp(tk.Tk):
         pw   = self.var_pw.get()
 
         try:
-            if user.lower() in ("sys", "locb2") or self.var_sysdba.get():
+            # Thêm 'admin' vào danh sách tài khoản đặc biệt không mã hóa
+            if user.lower() in ("sys", "locb2", "admin") or self.var_sysdba.get():
                 oracle_user, oracle_pw = user, pw
             else:
                 try:
@@ -393,7 +402,7 @@ class OracleApp(tk.Tk):
         dlg.grab_set()
 
         pad = 8
-        ttk.Label(dlg, text="Create Oracle User (requires SYS privileges)", font=("Segoe UI", 12, "bold")).grid(row=0, column=0, columnspan=2, pady=(10, 10))
+        ttk.Label(dlg, text="Create Oracle User (requires admin privileges)", font=("Segoe UI", 12, "bold")).grid(row=0, column=0, columnspan=2, pady=(10, 10))
         ttk.Label(dlg, text="New username").grid(row=1, column=0, sticky="e", padx=pad, pady=pad)
         v_user = tk.StringVar()
         ttk.Entry(dlg, textvariable=v_user, width=28).grid(row=1, column=1, sticky="w", padx=pad, pady=pad)
@@ -429,7 +438,7 @@ class OracleApp(tk.Tk):
                 return
             try:
                 # Xử lý tài khoản đặc biệt (SYS, LOCB2)
-                if new_user.lower() in ("sys", "locb2"):
+                if new_user.lower() in ("sys", "locb2", "admin"):
                     oracle_uname, oracle_pw = new_user, new_pw
                 else:
                     try:
@@ -473,6 +482,16 @@ class OracleApp(tk.Tk):
         for r in rows:
             disp = [("" if v is None else str(v)) for v in r]
             self.tree.insert("", "end", values=disp)
+
+    def _show_load_data_form(self):
+        """
+        Open the current 'load data' view. Rebuilds the main frame so the
+        existing load-data controls are shown (table chooser + Load data).
+        """
+        try:
+            self._build_main_frame()
+        except Exception as e:
+            messagebox.showerror("Error", f"Không thể mở form Load data:\n{e}")
 
 # ------------------------------- MAIN -------------------------------------
 if __name__ == "__main__":
