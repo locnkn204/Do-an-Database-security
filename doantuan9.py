@@ -72,11 +72,7 @@ def listen_logout(conn, app_ref):
 # --------------------- Application-level "encryption" ---------------------
 def _encrypt_file_ui(self):
     # Hàm UI để gọi run_encryption
-    # Bạn cần bổ sung phần lấy input (algo, action, src, dest, keytxt)
-    # có thể là mở file dialog chọn file, nhập key, chọn thuật toán, ...
-    # Đây chỉ là ví dụ đơn giản minh họa
-
-    algo = "des"          # hoặc "rsa", "aes" tùy bạn định nghĩa
+    algo = "des"          # hoặc "rsa", "aes"
     action = "encrypt"    # hoặc "decrypt"
     src = "input.txt"     # đường dẫn file nguồn
     dest = "output.enc"   # đường dẫn file đích
