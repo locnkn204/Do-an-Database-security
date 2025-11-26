@@ -3,7 +3,7 @@ from tkinter import ttk, messagebox
 import base64
 import hashlib
 from datetime import datetime
-import threading, time
+import threading
 
 from modules.encrypt_logic import run_encryption
 from modules.crypto_des import des_generate_key
@@ -12,6 +12,15 @@ from modules.user_tools import delete_user
 from modules.encrypt_form import open_encrypt_form
 from modules.user_delete_form import open_delete_user_form
 from modules.user_lock_form import open_lock_user_form
+
+# Import ứng dụng ký số
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'Kyso'))
+try:
+    from appkyso import DigitalSignatureApp
+except ImportError:
+    DigitalSignatureApp = None
 
 # oracledb import
 try:
@@ -83,6 +92,30 @@ def _encrypt_file_ui(self):
         messagebox.showinfo("Success", f"File đã được {action} thành công!")
     except Exception as e:
         messagebox.showerror("Error", f"Lỗi khi {action} file:\n{e}")
+
+def open_digital_signature_app(parent):
+    """Mở ứng dụng ký số trong cửa sổ mới"""
+    if DigitalSignatureApp is None:
+        messagebox.showerror("Lỗi", 
+            "Không thể tải ứng dụng ký số!\n\n"
+            "Kiểm tra lại:\n"
+            "- File appkyso.py có tồn tại trong thư mục Kyso không\n"
+            "- Thư viện cryptography đã được cài đặt chưa: pip install cryptography")
+        return
+    
+    try:
+        # Tạo cửa sổ mới cho ứng dụng ký số
+        kyso_window = tk.Toplevel(parent)
+        kyso_window.withdraw()  # Ẩn cửa sổ tạm thời
+        
+        # Khởi tạo ứng dụng ký số với cửa sổ mới
+        app = DigitalSignatureApp(kyso_window)
+        
+        # Hiển thị cửa sổ
+        kyso_window.deiconify()
+        
+    except Exception as e:
+        messagebox.showerror("Lỗi", f"Không thể mở ứng dụng ký số:\n{e}")
 
 def simple_encrypt(pw: str, add: int = 7, mul: int = 3, length: int = 60) -> str:
     if pw is None:
@@ -244,9 +277,8 @@ class OracleApp(tk.Tk):
         self._stop_listener = False       # yêu cầu thread dừng
         self._is_local_logout = False     # phiên này logout
 
-
         self._build_login_frame()
-
+    
     # ---------- Frames ----------
     def _build_login_frame(self):
         self._clear_frames()
@@ -268,7 +300,7 @@ class OracleApp(tk.Tk):
         ttk.Entry(f, textvariable=self.var_sid, width=25).grid(row=2, column=1, sticky="w", padx=5, pady=5)
 
         ttk.Label(f, text="Username").grid(row=3, column=0, sticky="e", padx=5, pady=5)
-        self.var_user = tk.StringVar(value="locb2")
+        self.var_user = tk.StringVar(value="locb3")
         ttk.Entry(f, textvariable=self.var_user, width=25).grid(row=3, column=1, sticky="w", padx=5, pady=5)
 
         ttk.Label(f, text="Password").grid(row=3, column=2, sticky="e", padx=5, pady=5)
@@ -304,6 +336,7 @@ class OracleApp(tk.Tk):
         ttk.Button(actions, text="Load data", command=self._show_load_data_form).pack(side="left", padx=6)
         ttk.Button(actions, text="Add data", command=lambda: messagebox.showinfo("Coming soon", "Tính năng Add data sẽ có sau.")).pack(side="left", padx=6)
         ttk.Button(actions, text="Mã hóa tập tin", command=lambda: open_encrypt_form(self)).pack(side="left", padx=6)
+        ttk.Button(actions, text="Ký số", command=lambda: open_digital_signature_app(self)).pack(side="left", padx=6)
         ttk.Button(actions, text="Xóa user", command=lambda: open_delete_user_form(self, self.conn)).pack(side="left", padx=6)
         ttk.Button(actions, text="Khóa/Mở user", command=lambda: open_lock_user_form(self, self.conn)).pack(side="left", padx=6)
 
@@ -415,7 +448,6 @@ class OracleApp(tk.Tk):
         self.conn = None
         self.current_user = None
         self._build_login_frame()
-
 
     def _open_register_dialog(self):
         dlg = tk.Toplevel(self)
