@@ -289,7 +289,7 @@ class UserViewerForm:
         tree_frame.grid_columnconfigure(0, weight=1)
         
         # Info label
-        info = ttk.Label(tab, text="ℹ️ Chức năng Kill Session đã bị tắt tạm thời",
+        info = ttk.Label(tab, text="ℹ️ Chức năng",
                         foreground="blue")
         info.pack(pady=5)
     

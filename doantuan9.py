@@ -4,6 +4,7 @@ import base64
 import hashlib
 from datetime import datetime
 import threading
+import time
 
 from modules.encrypt_logic import run_encryption
 from modules.crypto_des import des_generate_key
@@ -29,17 +30,21 @@ try:
 except Exception as e:
     oracledb = None
 
-def listen_logout(conn, app_ref):
+def listen_logout(conn, app_ref, username):
+    """Lắng nghe logout alert riêng cho từng user."""
     cur = None
+    # Tạo alert name riêng cho user này
+    alert_name = f'LOGOUT_ALERT_{username.upper()}'
+    
     try:
         cur = conn.cursor()
-        cur.callproc('DBMS_ALERT.REGISTER', ['LOGOUT_ALERT_LOCB2'])
+        cur.callproc('DBMS_ALERT.REGISTER', [alert_name])
         # vòng chờ ngắn để phản hồi nhanh (2s thay vì 10s)
         while not app_ref._stop_listener:
             try:
                 channel, message, status, timeout = cur.callproc(
                     'DBMS_ALERT.WAITONE',
-                    ['LOGOUT_ALERT_LOCB2', '', 0, 2]
+                    [alert_name, '', 0, 2]
                 )
             except Exception:
                 break
@@ -71,12 +76,145 @@ def listen_logout(conn, app_ref):
         try:
             if cur:
                 try:
-                    cur.callproc('DBMS_ALERT.UNREGISTER', ['LOGOUT_ALERT_LOCB2'])
+                    cur.callproc('DBMS_ALERT.UNREGISTER', [alert_name])
                 except Exception:
                     pass
                 cur.close()
         except Exception:
             pass
+
+
+def logout_all_other_sessions(conn, current_username, exclude_sid=None):
+    """
+    Ngắt kết nối TẤT CẢ các phiên của user, trừ phiên hiện tại.
+    
+    Args:
+        conn: Kết nối Oracle hiện tại
+        current_username: Username cần logout (ví dụ: 'LOCB3')
+        exclude_sid: SID của phiên hiện tại (để không kill chính mình)
+    
+    Returns:
+        int: Số phiên đã logout
+    """
+    try:
+        cur = conn.cursor()
+        
+        # Tạo alert name riêng cho user này
+        alert_name = f'LOGOUT_ALERT_{current_username.upper()}'
+        
+        # Lấy SID của phiên hiện tại nếu chưa có
+        if exclude_sid is None:
+            cur.execute("""
+                SELECT sid 
+                FROM v$session 
+                WHERE audsid = SYS_CONTEXT('USERENV', 'SESSIONID')
+            """)
+            result = cur.fetchone()
+            exclude_sid = result[0] if result else None
+        
+        # Lấy danh sách TẤT CẢ phiên của user (trừ phiên hiện tại)
+        if exclude_sid:
+            cur.execute("""
+                SELECT sid, serial#, machine, program
+                FROM v$session
+                WHERE username = :uname
+                  AND sid != :exclude_sid
+                  AND type = 'USER'
+            """, {'uname': current_username.upper(), 'exclude_sid': exclude_sid})
+        else:
+            cur.execute("""
+                SELECT sid, serial#, machine, program
+                FROM v$session
+                WHERE username = :uname
+                  AND type = 'USER'
+            """, {'uname': current_username.upper()})
+        
+        sessions_to_kill = cur.fetchall()
+        
+        if not sessions_to_kill:
+            print(f"✅ Không có phiên nào khác của {current_username}")
+            return 0
+        
+        # Gửi SIGNAL riêng cho user này (không ảnh hưởng users khác)
+        try:
+            cur.callproc('DBMS_ALERT.SIGNAL', [alert_name, 'LOGOUT_NOW'])
+            conn.commit()
+            print(f"📤 Đã gửi DBMS_ALERT đến {len(sessions_to_kill)} phiên của {current_username}")
+        except Exception as e:
+            print(f"⚠️ Không thể gửi DBMS_ALERT: {e}")
+        
+        # Đợi 1s để DBMS_ALERT được xử lý (graceful logout)
+        time.sleep(1)
+        
+        # Kill các phiên còn lại (nếu chưa logout)
+        killed_count = 0
+        for sid, serial, machine, program in sessions_to_kill:
+            try:
+                # Kiểm tra phiên còn tồn tại không
+                cur.execute("""
+                    SELECT COUNT(*) 
+                    FROM v$session 
+                    WHERE sid = :sid AND serial# = :serial
+                """, {'sid': sid, 'serial': serial})
+                
+                if cur.fetchone()[0] == 0:
+                    print(f"✅ Phiên SID={sid} đã logout (qua DBMS_ALERT)")
+                    continue
+                
+                # Kill session
+                cur.execute(f"ALTER SYSTEM KILL SESSION '{sid},{serial}' IMMEDIATE")
+                killed_count += 1
+                print(f"🔴 Đã kill phiên: SID={sid}, Serial={serial}, Device={machine}")
+                
+            except oracledb.DatabaseError as e:
+                error_code = e.args[0].code if e.args else None
+                if error_code == 30:  # ORA-00030: Session không tồn tại
+                    print(f"✅ Phiên SID={sid} đã không còn tồn tại")
+                elif error_code == 31:  # ORA-00031: Session đang được marked for kill
+                    print(f"⏳ Phiên SID={sid} đang được kill")
+                    killed_count += 1
+                else:
+                    print(f"❌ Lỗi kill phiên SID={sid}: {e}")
+        
+        conn.commit()
+        total_affected = len(sessions_to_kill)
+        print(f"✅ Đã logout {total_affected} phiên khác của {current_username}")
+        return total_affected
+        
+    except Exception as e:
+        print(f"❌ Lỗi trong logout_all_other_sessions: {e}")
+        return 0
+
+
+def check_session_limit(conn, username, max_sessions=1):
+    """
+    Kiểm tra số phiên đang kết nối của user.
+    
+    Args:
+        conn: Kết nối Oracle
+        username: Username cần check
+        max_sessions: Giới hạn số phiên (mặc định = 1)
+    
+    Returns:
+        tuple: (current_count, exceeded) - số phiên hiện tại và có vượt quá không
+    """
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM v$session
+            WHERE username = :uname
+              AND type = 'USER'
+        """, {'uname': username.upper()})
+        
+        count = cur.fetchone()[0]
+        exceeded = count > max_sessions
+        
+        return count, exceeded
+        
+    except Exception as e:
+        print(f"❌ Lỗi kiểm tra session limit: {e}")
+        return 0, False
 
 
 # --------------------- Application-level "encryption" ---------------------
@@ -277,6 +415,7 @@ class OracleApp(tk.Tk):
         self.current_user = None
         self._stop_listener = False       # yêu cầu thread dừng
         self._is_local_logout = False     # phiên này logout
+        self.max_sessions = 2              # Giới hạn số phiên đồng thời (thay đổi thành 2, 3... nếu cần)
 
         self._build_login_frame()
     
@@ -415,6 +554,23 @@ class OracleApp(tk.Tk):
                 f"Lỗi không xác định:\n{str(e)}")
             return
 
+        # Kiểm tra session limit và logout các phiên khác nếu cần
+        try:
+            current_count, exceeded = check_session_limit(conn, oracle_user, self.max_sessions)
+            
+            if exceeded:
+                # Có quá nhiều phiên → logout các phiên khác
+                print(f"⚠️ Phát hiện {current_count} phiên (giới hạn: {self.max_sessions})")
+                
+                affected = logout_all_other_sessions(conn, oracle_user)
+                
+                if affected > 0:
+                    messagebox.showinfo("Đăng nhập",
+                        f"Đã đăng xuất {affected} thiết bị khác.\n"
+                        f"Giới hạn: {self.max_sessions} thiết bị cùng lúc.")
+        except Exception as e:
+            print(f"⚠️ Không thể kiểm tra session limit: {e}")
+
         # Reset flags trước khi start listener (fix bug logout lần 2)
         self._stop_listener = False       # Cho phép listener hoạt động
         self._is_local_logout = False     # Reset trạng thái logout
@@ -423,7 +579,8 @@ class OracleApp(tk.Tk):
         self.current_user = user
         messagebox.showinfo("Login success", f"Đăng nhập thành công đến {host}:{port}/{sid} as {user}")
         self._build_main_frame()
-        threading.Thread(target=listen_logout, args=(self.conn, self), daemon=True).start()
+        # Truyền username để tạo alert name riêng cho user này
+        threading.Thread(target=listen_logout, args=(self.conn, self, oracle_user), daemon=True).start()
 
 
     def _logout(self):
@@ -432,16 +589,29 @@ class OracleApp(tk.Tk):
                 self._is_local_logout = True     # đánh dấu là logout cục bộ
                 self._stop_listener = True       # yêu cầu thread dừng
 
+                # Logout tất cả phiên khác trước
+                try:
+                    affected = logout_all_other_sessions(self.conn, self.current_user)
+                    if affected > 0:
+                        print(f"✅ Đã logout {affected} phiên khác trước khi thoát")
+                except Exception as e:
+                    print(f"⚠️ Không thể logout các phiên khác: {e}")
+
+                # Tạo alert name riêng cho user này
                 cur = self.conn.cursor()
+                cur.execute("SELECT USER FROM DUAL")
+                oracle_username = cur.fetchone()[0].upper()
+                alert_name = f'LOGOUT_ALERT_{oracle_username}'
+                
                 # Ngừng đăng ký kênh lắng nghe 
                 try:
-                    cur.callproc('DBMS_ALERT.UNREGISTER', ['LOGOUT_ALERT_LOCB2'])
+                    cur.callproc('DBMS_ALERT.UNREGISTER', [alert_name])
                 except Exception:
                     pass
 
-                # Phát tín hiệu cho các phiên khác
+                # Phát tín hiệu cho các phiên còn lại (nếu có)
                 try:
-                    cur.callproc('DBMS_ALERT.SIGNAL', ['LOGOUT_ALERT_LOCB2', 'LOGOUT_NOW'])
+                    cur.callproc('DBMS_ALERT.SIGNAL', [alert_name, 'LOGOUT_NOW'])
                     self.conn.commit()
                 except Exception:
                     pass
