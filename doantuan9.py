@@ -361,6 +361,12 @@ def create_user_and_grant(conn, new_user, new_password,
         # non-fatal, log for troubleshooting
         print(f"⚠️ Không thể cấp EXECUTE trên SYS.DBMS_ALERT cho {new_user_u}: {e}")
 
+    # Grant SELECT on v$session for session management
+    try:
+        cur.execute(f'GRANT SELECT ON v_$session TO {new_user_u}')
+    except Exception as e:
+        print(f"⚠️ Không thể cấp SELECT trên v$session cho {new_user_u}: {e}")
+
     # 3️ Cấp quyền SELECT toàn bộ bảng của LOCB2
     cur.execute("SELECT table_name FROM all_tables WHERE owner = :own", {"own": owner_u})
     tables = [r[0] for r in cur.fetchall()]

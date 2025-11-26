@@ -1,12 +1,13 @@
 """
 Module hiển thị thông tin người dùng và quyền truy cập
 Chỉ dành cho admin (LOCB2, SYS, hoặc có quyền DBA)
-Không bao gồm chức năng kill session
+Bao gồm chức năng kill session
 """
 
 import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
+import time
 
 try:
     import oracledb
@@ -138,6 +139,155 @@ def get_user_privileges_on_locb2(conn, username):
         return []
 
 
+def kick_user_by_username(conn, target_username):
+    """
+    Admin đá user ra khỏi hệ thống (Gửi Alert -> Đợi -> Kill All)
+    Hoạt động giống logout_all_other_sessions nhưng dành cho Admin
+    
+    Args:
+        conn: Kết nối Oracle
+        target_username: Username cần kick
+    
+    Returns:
+        (session_count: int, message: str)
+    """
+    cursor = conn.cursor()
+    try:
+        # 1. Lấy SID của Admin (để không tự sát)
+        cursor.execute("SELECT SYS_CONTEXT('USERENV', 'SID') FROM DUAL")
+        admin_sid = str(cursor.fetchone()[0])
+
+        # 2. Tìm tất cả session của user mục tiêu
+        cursor.execute("""
+            SELECT sid, serial#, machine, program
+            FROM v$session
+            WHERE username = :uname
+              AND type = 'USER'
+        """, {'uname': target_username.upper()})
+        
+        sessions = cursor.fetchall()
+        if not sessions:
+            return 0, "User này không có kết nối nào."
+
+        # 3. Gửi tín hiệu nhẹ nhàng (DBMS_ALERT)
+        alert_name = f'LOGOUT_ALERT_{target_username.upper()}'
+        try:
+            cursor.callproc('DBMS_ALERT.SIGNAL', [alert_name, 'LOGOUT_NOW'])
+            conn.commit()
+            print(f"🔔 Đã gửi DBMS_ALERT đến {target_username}")
+        except Exception as e:
+            print(f"⚠️ Không gửi được alert: {e}")
+            pass  # Bỏ qua nếu lỗi gửi alert
+
+        # Đợi 1 chút cho client tự thoát
+        time.sleep(1.0)
+
+        # 4. Kill tàn dư (Những session chưa chịu thoát)
+        kill_count = 0
+        for sid, serial, machine, program in sessions:
+            # BẢO VỆ: Không bao giờ kill chính Admin đang thao tác
+            if str(sid) == admin_sid:
+                print(f"⚠️ Bỏ qua session {sid} (chính Admin)")
+                continue
+
+            try:
+                # Kiểm tra lại xem nó còn sống không
+                cursor.execute("SELECT count(*) FROM v$session WHERE sid=:s AND serial#=:r",
+                             {'s': sid, 'r': serial})
+                if cursor.fetchone()[0] == 0:
+                    print(f"✅ Session {sid},{serial} đã tự thoát")
+                    continue  # Đã tự thoát rồi
+
+                # Kill dứt khoát
+                cursor.execute(f"ALTER SYSTEM KILL SESSION '{sid},{serial}' IMMEDIATE")
+                kill_count += 1
+                print(f"💀 Đã kill session {sid},{serial} ({machine})")
+            except oracledb.DatabaseError as e:
+                # Bỏ qua lỗi ORA-00031 (đang dọn dẹp) hoặc ORA-00030/00027 (đã chết)
+                if e.args[0].code not in (27, 30, 31):
+                    print(f"❌ Lỗi kill {sid}: {e}")
+
+        conn.commit()
+        return len(sessions), f"Đã gửi lệnh đăng xuất tới user {target_username}.\nĐã kill cưỡng chế {kill_count} session cứng đầu."
+
+    except Exception as e:
+        print(f"❌ Lỗi kick_user_by_username: {e}")
+        return 0, f"Lỗi: {e}"
+    finally:
+        cursor.close()
+
+
+def kill_session(conn, sid, serial):
+    """
+    Admin kill một session cụ thể (KHÔNG gửi DBMS_ALERT)
+    
+    Args:
+        conn: Kết nối Oracle
+        sid: Session ID
+        serial: Serial number
+    
+    Returns:
+        (success: bool, message: str)
+    """
+    cursor = conn.cursor()
+    try:
+        # 1. BƯỚC BẢO VỆ: Kiểm tra xem có đang định kill chính mình không
+        cursor.execute("SELECT SYS_CONTEXT('USERENV', 'SID') FROM DUAL")
+        my_sid = str(cursor.fetchone()[0])
+        
+        if str(sid) == my_sid:
+            print(f"🚨 NGUY HIỂM: Admin cố kill chính mình (SID={sid})")
+            return False, "⛔ NGUY HIỂM: Không thể kill session của chính Admin!"
+
+        # 2. Lấy thông tin session trước khi kill
+        cursor.execute("""
+            SELECT username, machine, program
+            FROM v$session
+            WHERE sid = :sid AND serial# = :serial
+        """, {'sid': sid, 'serial': serial})
+        
+        result = cursor.fetchone()
+        if not result:
+            print(f"⚠️ Session SID={sid}, Serial={serial} không tồn tại")
+            return False, f"Session SID={sid}, Serial={serial} không tồn tại"
+        
+        username, machine, program = result
+        print(f"🎯 Killing session: {username}@{machine} (SID={sid}, Serial={serial})")
+
+        # 3. THỰC HIỆN KILL - Chỉ dùng ALTER SYSTEM, KHÔNG gửi DBMS_ALERT
+        sql = f"ALTER SYSTEM KILL SESSION '{sid},{serial}' IMMEDIATE"
+        cursor.execute(sql)
+        conn.commit()
+        
+        print(f"✅ Successfully killed session {sid},{serial}")
+        return True, f"✅ Đã kill session: {username}@{machine}\nSID={sid}, Serial={serial}"
+
+    except oracledb.DatabaseError as e:
+        error, = e.args
+        
+        # 4. XỬ LÝ LỖI ORA-00031 (Session marked for kill)
+        # Đây thực chất là thành công nhưng Oracle báo lỗi vì session chưa dọn dẹp xong
+        if error.code == 31:
+            print(f"⏳ Session {sid},{serial} đang được dọn dẹp ngầm")
+            return True, "✅ Đã gửi lệnh Kill (Session đang được dọn dẹp ngầm)."
+        
+        # Lỗi ORA-00027 hoặc ORA-00030: Session không tồn tại (có thể user đã tự thoát)
+        elif error.code in (27, 30):
+            print(f"⚠️ Session {sid},{serial} đã kết thúc từ trước")
+            return True, "✅ Session này đã kết thúc từ trước."
+            
+        else:
+            print(f"❌ Lỗi Oracle {error.code}: {str(e)}")
+            return False, f"❌ Lỗi Oracle: {str(e)}"
+            
+    except Exception as e:
+        print(f"❌ Unexpected error: {e}")
+        return False, f"❌ Lỗi: {e}"
+        
+    finally:
+        cursor.close()
+
+
 def get_session_statistics(conn):
     """
     Lấy thống kê về các phiên kết nối
@@ -174,12 +324,13 @@ def get_session_statistics(conn):
 
 
 class UserViewerForm:
-    """Form hiển thị thông tin user và quyền (chỉ xem, không kill)"""
+    """Form hiển thị thông tin user, quyền và kill session (thread-safe)"""
     
     def __init__(self, parent, conn):
         self.conn = conn
+        self.db_lock = threading.Lock()  # Bảo vệ truy cập DB khỏi nhiều thread
         self.window = tk.Toplevel(parent)
-        self.window.title("Quản Lý User - Chỉ Xem")
+        self.window.title("Quản Lý User & Kill Session")
         self.window.geometry("900x600")
         self.window.transient(parent)
         
@@ -241,6 +392,9 @@ class UserViewerForm:
         ttk.Label(toolbar, text="Danh sách người dùng đang kết nối:",
                  font=("Segoe UI", 10, "bold")).pack(side="left")
         
+        ttk.Button(toolbar, text="🚫 Kill Session", 
+                  command=self._kill_selected_session).pack(side="right", padx=5)
+        
         ttk.Button(toolbar, text="Refresh", 
                   command=self.load_connected_users).pack(side="right", padx=5)
         
@@ -289,7 +443,7 @@ class UserViewerForm:
         tree_frame.grid_columnconfigure(0, weight=1)
         
         # Info label
-        info = ttk.Label(tab, text="ℹ️ Chức năng",
+        info = ttk.Label(tab, text="ℹ️ Chọn session và nhấn 'Kill Session' để ngắt kết nối",
                         foreground="blue")
         info.pack(pady=5)
     
@@ -391,20 +545,22 @@ class UserViewerForm:
         self.load_users_with_access()
     
     def _update_statistics(self):
-        """Cập nhật thống kê"""
-        stats = get_session_statistics(self.conn)
+        """Cập nhật thống kê (thread-safe)"""
+        with self.db_lock:
+            stats = get_session_statistics(self.conn)
         text = f"📊 Tổng: {stats['total']} | 🟢 Active: {stats['active']} | ⚪ Inactive: {stats['inactive']}"
         self.stats_label.config(text=text)
     
     def load_connected_users(self):
-        """Load danh sách user đang kết nối"""
+        """Load danh sách user đang kết nối (thread-safe)"""
         # Xóa dữ liệu cũ
         for item in self.connected_tree.get_children():
             self.connected_tree.delete(item)
         
         # Load dữ liệu mới trong thread để không block UI
         def _load():
-            users = get_connected_users(self.conn)
+            with self.db_lock:
+                users = get_connected_users(self.conn)
             
             def _update_ui():
                 for user in users:
@@ -419,12 +575,13 @@ class UserViewerForm:
         threading.Thread(target=_load, daemon=True).start()
     
     def load_users_with_access(self):
-        """Load danh sách user có quyền truy cập"""
+        """Load danh sách user có quyền truy cập (thread-safe)"""
         for item in self.access_tree.get_children():
             self.access_tree.delete(item)
         
         def _load():
-            users = get_users_with_access(self.conn, 'LOCB2')
+            with self.db_lock:
+                users = get_users_with_access(self.conn, 'LOCB2')
             
             def _update_ui():
                 for username, table_count in users:
@@ -438,7 +595,7 @@ class UserViewerForm:
         threading.Thread(target=_load, daemon=True).start()
     
     def load_user_details(self):
-        """Load chi tiết quyền của user"""
+        """Load chi tiết quyền của user (thread-safe)"""
         username = self.username_var.get().strip()
         if not username:
             messagebox.showwarning("Thiếu thông tin", 
@@ -449,7 +606,8 @@ class UserViewerForm:
             self.details_tree.delete(item)
         
         def _load():
-            privileges = get_user_privileges_on_locb2(self.conn, username)
+            with self.db_lock:
+                privileges = get_user_privileges_on_locb2(self.conn, username)
             
             def _update_ui():
                 if not privileges:
@@ -470,6 +628,49 @@ class UserViewerForm:
                 pass
         
         threading.Thread(target=_load, daemon=True).start()
+    
+    def _kill_selected_session(self):
+        """Kick user (logout all sessions) được chọn trong connected users tree"""
+        selection = self.connected_tree.selection()
+        if not selection:
+            messagebox.showwarning("Chưa chọn",
+                                  "Vui lòng chọn user cần ngắt kết nối!")
+            return
+        
+        item = self.connected_tree.item(selection[0])
+        values = item['values']
+        
+        target_username = str(values[0])  # Lấy username
+        
+        # Cảnh báo rõ ràng cho Admin
+        confirm = messagebox.askyesno(
+            "Xác nhận Logout",
+            f"Bạn có muốn ĐÁ (Logout) user '{target_username}' không?\n\n"
+            f"⚠️ LƯU Ý: Hành động này sẽ ngắt kết nối TẤT CẢ các thiết bị\n"
+            f"mà user '{target_username}' đang đăng nhập!"
+        )
+        
+        if not confirm:
+            return
+        
+        # Thực hiện trong thread để không đơ UI
+        def _do_kick():
+            # QUAN TRỌNG: Vẫn phải dùng Lock để tránh crash app Admin
+            with self.db_lock:
+                count, msg = kick_user_by_username(self.conn, target_username)
+            
+            # Cập nhật UI
+            def _update_ui():
+                messagebox.showinfo("Kết quả", msg)
+                self.load_connected_users()  # Refresh danh sách
+                self._update_statistics()
+            
+            try:
+                self.window.after(0, _update_ui)
+            except Exception:
+                pass
+        
+        threading.Thread(target=_do_kick, daemon=True).start()
     
     def _on_access_double_click(self, event):
         """Xử lý double-click trên access tree"""
