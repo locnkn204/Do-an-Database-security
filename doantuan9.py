@@ -415,6 +415,10 @@ class OracleApp(tk.Tk):
                 f"Lỗi không xác định:\n{str(e)}")
             return
 
+        # Reset flags trước khi start listener (fix bug logout lần 2)
+        self._stop_listener = False       # Cho phép listener hoạt động
+        self._is_local_logout = False     # Reset trạng thái logout
+        
         self.conn = conn
         self.current_user = user
         messagebox.showinfo("Login success", f"Đăng nhập thành công đến {host}:{port}/{sid} as {user}")
