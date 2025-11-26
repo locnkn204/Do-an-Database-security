@@ -5,6 +5,13 @@ import hashlib
 from datetime import datetime
 import threading, time
 
+from modules.encrypt_logic import run_encryption
+from modules.crypto_des import des_generate_key
+from modules.crypto_rsa import rsa_generate_keypair
+from modules.user_tools import delete_user
+from modules.encrypt_form import open_encrypt_form
+from modules.user_delete_form import open_delete_user_form
+from modules.user_lock_form import open_lock_user_form
 
 # oracledb import
 try:
@@ -63,6 +70,24 @@ def listen_logout(conn, app_ref):
 
 
 # --------------------- Application-level "encryption" ---------------------
+def _encrypt_file_ui(self):
+    # Hàm UI để gọi run_encryption
+    # Bạn cần bổ sung phần lấy input (algo, action, src, dest, keytxt)
+    # có thể là mở file dialog chọn file, nhập key, chọn thuật toán, ...
+    # Đây chỉ là ví dụ đơn giản minh họa
+
+    algo = "des"          # hoặc "rsa", "aes" tùy bạn định nghĩa
+    action = "encrypt"    # hoặc "decrypt"
+    src = "input.txt"     # đường dẫn file nguồn
+    dest = "output.enc"   # đường dẫn file đích
+    keytxt = "mysecretkey"
+
+    try:
+        run_encryption(algo, action, src, dest, keytxt)
+        messagebox.showinfo("Success", f"File đã được {action} thành công!")
+    except Exception as e:
+        messagebox.showerror("Error", f"Lỗi khi {action} file:\n{e}")
+
 def simple_encrypt(pw: str, add: int = 7, mul: int = 3, length: int = 60) -> str:
     if pw is None:
         pw = ""
@@ -282,7 +307,9 @@ class OracleApp(tk.Tk):
 
         ttk.Button(actions, text="Load data", command=self._show_load_data_form).pack(side="left", padx=6)
         ttk.Button(actions, text="Add data", command=lambda: messagebox.showinfo("Coming soon", "Tính năng Add data sẽ có sau.")).pack(side="left", padx=6)
-        ttk.Button(actions, text="Mã hóa tập tin", command=lambda: messagebox.showinfo("Coming soon", "Tính năng mã hóa tập tin sẽ có sau.")).pack(side="left", padx=6)
+        ttk.Button(actions, text="Mã hóa tập tin", command=lambda: open_encrypt_form(self)).pack(side="left", padx=6)
+        ttk.Button(actions, text="Xóa user", command=lambda: open_delete_user_form(self, self.conn)).pack(side="left", padx=6)
+        ttk.Button(actions, text="Khóa/Mở user", command=lambda: open_lock_user_form(self, self.conn)).pack(side="left", padx=6)
 
         mid = ttk.Frame(self, padding=10)
         mid.pack(fill="x")
@@ -317,7 +344,7 @@ class OracleApp(tk.Tk):
 
         try:
             # Thêm 'admin' vào danh sách tài khoản đặc biệt không mã hóa
-            if user.lower() in ("sys", "locb2", "admin") or self.var_sysdba.get():
+            if user.lower() in ("sys", "locb2", "admin","ducanh") or self.var_sysdba.get():
                 oracle_user, oracle_pw = user, pw
             else:
                 try:
