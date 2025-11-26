@@ -12,6 +12,7 @@ from modules.user_tools import delete_user
 from modules.encrypt_form import open_encrypt_form
 from modules.user_delete_form import open_delete_user_form
 from modules.user_lock_form import open_lock_user_form
+from modules.user_viewer_form import open_user_viewer_form
 
 # Import ứng dụng ký số
 import sys
@@ -337,6 +338,7 @@ class OracleApp(tk.Tk):
         ttk.Button(actions, text="Add data", command=lambda: messagebox.showinfo("Coming soon", "Tính năng Add data sẽ có sau.")).pack(side="left", padx=6)
         ttk.Button(actions, text="Mã hóa tập tin", command=lambda: open_encrypt_form(self)).pack(side="left", padx=6)
         ttk.Button(actions, text="Ký số", command=lambda: open_digital_signature_app(self)).pack(side="left", padx=6)
+        ttk.Button(actions, text="Quản lý user", command=lambda: self._open_user_viewer_if_admin()).pack(side="left", padx=6)
         ttk.Button(actions, text="Xóa user", command=lambda: open_delete_user_form(self, self.conn)).pack(side="left", padx=6)
         ttk.Button(actions, text="Khóa/Mở user", command=lambda: open_lock_user_form(self, self.conn)).pack(side="left", padx=6)
 
@@ -448,6 +450,41 @@ class OracleApp(tk.Tk):
         self.conn = None
         self.current_user = None
         self._build_login_frame()
+
+    def _open_user_viewer_if_admin(self):
+        """Mở form quản lý user chỉ khi có quyền admin"""
+        if not self.conn:
+            messagebox.showerror("Lỗi", "Không có kết nối database!")
+            return
+        
+        try:
+            # Kiểm tra quyền admin
+            cur = self.conn.cursor()
+            cur.execute("SELECT USER FROM DUAL")
+            current_user = cur.fetchone()[0].upper()
+            
+            # Nếu là LOCB2, SYS, SYSTEM -> cho phép
+            if current_user in ('LOCB2', 'SYS', 'SYSTEM'):
+                open_user_viewer_form(self, self.conn)
+                return
+            
+            # Kiểm tra có role DBA không
+            cur.execute("""
+                SELECT COUNT(*) 
+                FROM USER_ROLE_PRIVS 
+                WHERE GRANTED_ROLE = 'DBA'
+            """)
+            has_dba = cur.fetchone()[0] > 0
+            
+            if has_dba:
+                open_user_viewer_form(self, self.conn)
+            else:
+                messagebox.showerror("Từ Chối Truy Cập",
+                    f"Chức năng này chỉ dành cho quản trị viên!\n\n"
+                    f"Người dùng hiện tại: {current_user}\n"
+                    f"Cần có quyền DBA hoặc là tài khoản LOCB2/SYS.")
+        except Exception as e:
+            messagebox.showerror("Lỗi", f"Không thể kiểm tra quyền:\n{e}")
 
     def _open_register_dialog(self):
         dlg = tk.Toplevel(self)
