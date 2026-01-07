@@ -1,32 +1,28 @@
-from Crypto.Cipher import DES
-from Crypto.Random import get_random_bytes
+import cx_Oracle
 
-def des_generate_key():
-    return get_random_bytes(8)
-
-def des_encrypt_file(input_path, output_path, key: bytes):
-    cipher = DES.new(key, DES.MODE_EAX)
+def oracle_des_encrypt_file(conn, input_path, output_path):
     data = open(input_path, "rb").read()
-    ciphertext, tag = cipher.encrypt_and_digest(data)
+    cur = conn.cursor()
 
-    with open(output_path, "wb") as f:
-        f.write(bytes([len(cipher.nonce)]))
-        f.write(cipher.nonce)
-        f.write(bytes([len(tag)]))
-        f.write(tag)
-        f.write(ciphertext)
+    cur.execute("""
+        SELECT des_encrypt_raw(:data) FROM dual
+    """, data=data)
 
-def des_decrypt_file(input_path, output_path, key: bytes):
-    raw = open(input_path, "rb").read()
+    encrypted, = cur.fetchone()
+    open(output_path, "wb").write(encrypted)
 
-    idx = 0
-    nonce_len = raw[idx]; idx += 1
-    nonce = raw[idx:idx+nonce_len]; idx += nonce_len
-    tag_len = raw[idx]; idx += 1
-    tag = raw[idx:idx+tag_len]; idx += tag_len
-    ciphertext = raw[idx:]
+    cur.close()
 
-    cipher = DES.new(key, DES.MODE_EAX, nonce=nonce)
-    plaintext = cipher.decrypt_and_verify(ciphertext, tag)
 
-    open(output_path, "wb").write(plaintext)
+def oracle_des_decrypt_file(conn, input_path, output_path):
+    data = open(input_path, "rb").read()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT des_decrypt_raw(:data) FROM dual
+    """, data=data)
+
+    decrypted, = cur.fetchone()
+    open(output_path, "wb").write(decrypted)
+
+    cur.close()

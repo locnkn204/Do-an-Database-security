@@ -2,7 +2,6 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 from .encrypt_logic import run_encryption
-from .crypto_des import des_generate_key
 from .crypto_rsa import rsa_generate_keypair
 
 
@@ -52,10 +51,6 @@ def open_encrypt_form(parent):
     helper = ttk.Frame(win)
     helper.pack(pady=6)
 
-    ttk.Button(helper, text="Tạo khóa DES",
-               command=lambda: key_box.insert("1.0", des_generate_key().hex())
-               ).pack(side="left", padx=5)
-
     def gen_rsa_keys():
         priv, pub = rsa_generate_keypair()
         key_box.delete("1.0", "end")
@@ -67,11 +62,22 @@ def open_encrypt_form(parent):
 
     # ---------------- RUN ----------------
     def do_run():
-        keytxt = key_box.get("1.0", "end").strip()
-        try:
-            run_encryption(algo.get(), action.get(), src.get(), dest.get(), keytxt)
-            messagebox.showinfo("Thành công", f"{action.get().upper()} thành công!")
-        except Exception as e:
-            messagebox.showerror("Lỗi", str(e))
+    	try:
+        	run_encryption(
+            	algo.get(),
+            	action.get(),
+            	src.get(),
+            	dest.get(),
+            	key_box.get("1.0", "end").strip(),
+            	conn=parent.conn   # ✅ TRUYỀN ORACLE CONNECTION
+        	)
+        	messagebox.showinfo("Success", f"{action.get().upper()} thành công!")
+    	except Exception as e:
+        	messagebox.showerror("Error", str(e))
 
-    ttk.Button(win, text="Thực thi", padding=10, command=do_run).pack(pady=10)
+    ttk.Button(
+        win,
+        text="Thực thi",
+        command=do_run
+    ).pack(pady=15)
+
