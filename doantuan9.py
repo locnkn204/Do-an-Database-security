@@ -6,8 +6,8 @@ from datetime import datetime
 import threading
 import time
 
+from modules.privilege_form import open_privilege_form
 from modules.encrypt_logic import run_encryption
-from modules.crypto_des import des_generate_key
 from modules.crypto_rsa import rsa_generate_keypair
 from modules.user_tools import delete_user
 from modules.encrypt_form import open_encrypt_form
@@ -485,9 +485,12 @@ class OracleApp(tk.Tk):
         ttk.Button(actions, text="Mã hóa tập tin", command=lambda: open_encrypt_form(self)).pack(side="left", padx=6)
         ttk.Button(actions, text="Ký số", command=lambda: open_digital_signature_app(self)).pack(side="left", padx=6)
         ttk.Button(actions, text="Quản lý user", command=lambda: self._open_user_viewer_if_admin()).pack(side="left", padx=6)
-        ttk.Button(actions, text="Xóa user", command=lambda: open_delete_user_form(self, self.conn)).pack(side="left", padx=6)
-        ttk.Button(actions, text="Khóa/Mở user", command=lambda: open_lock_user_form(self, self.conn)).pack(side="left", padx=6)
+        ttk.Button(actions, text="Phân quyền user",
+           command=lambda: open_privilege_form(self, self.conn)
+           ).pack(side="left", padx=6)
 
+        ttk.Button(actions, text="Khóa/Mở user", command=lambda: open_lock_user_form(self, self.conn)).pack(side="left", padx=6)
+	
         mid = ttk.Frame(self, padding=10)
         mid.pack(fill="x")
         ttk.Label(mid, text="Choose table:").pack(side="left")
@@ -521,7 +524,7 @@ class OracleApp(tk.Tk):
 
         try:
             # Thêm 'admin' vào danh sách tài khoản đặc biệt không mã hóa
-            if user.lower() in ("sys", "locb2", "admin","ducanh") or self.var_sysdba.get():
+            if user.lower() in ("sys", "locb2", "admin","huyen") or self.var_sysdba.get():
                 oracle_user, oracle_pw = user, pw
             else:
                 try:
