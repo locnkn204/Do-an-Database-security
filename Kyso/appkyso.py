@@ -9,13 +9,18 @@ from cryptography import x509
 from cryptography.x509.oid import NameOID
 import json
 import base64
+import io
+import tempfile
 
 class DigitalSignatureApp:
-    def __init__(self, root):
+    def __init__(self, root, conn=None):
         self.root = root
         self.root.title("Phần Mềm Ký Số Chuyên Nghiệp")
         self.root.geometry("1200x700")
         self.root.configure(bg="#f0f0f0")
+        
+        # Kết nối database (tùy chọn)
+        self.db_conn = conn
         
         # Danh sách file đã upload
         self.uploaded_files = []
@@ -76,6 +81,23 @@ class DigitalSignatureApp:
             width=25
         )
         upload_btn.pack(pady=5)
+        
+        # 🆕 Import from Database button (luôn hiển thị, nhưng vô hiệu hóa nếu không có connection)
+        self.import_db_btn = tk.Button(
+            control_frame,
+            text="📥 Import từ Database",
+            command=self.import_from_database,
+            bg="#16a085" if self.db_conn else "#95a5a6",
+            fg="white",
+            font=("Arial", 11, "bold"),
+            relief=tk.FLAT,
+            cursor="hand2" if self.db_conn else "arrow",
+            padx=20,
+            pady=10,
+            width=25,
+            state=tk.NORMAL if self.db_conn else tk.DISABLED
+        )
+        self.import_db_btn.pack(pady=5)
         
         # Sign button
         sign_btn = tk.Button(
@@ -334,6 +356,168 @@ class DigitalSignatureApp:
                     
                 except Exception as e:
                     messagebox.showerror("Lỗi", f"Không thể upload file: {str(e)}")
+    
+    def import_from_database(self):
+        """🆕 Import file từ database - Chọn bảng và export"""
+        if not self.db_conn:
+            messagebox.showwarning("Lỗi Kết Nối", 
+                "Chưa có kết nối database!\n\n"
+                "Hãy:\n"
+                "1. Đăng nhập vào ứng dụng chính\n"
+                "2. Click nút 'Ký số' để mở app ký số với kết nối database\n"
+                "3. Hoặc truyền database connection khi khởi tạo ứng dụng")
+            return
+        
+        try:
+            # Lấy danh sách bảng
+            cur = self.db_conn.cursor()
+            cur.execute("""
+                SELECT table_name 
+                FROM all_tables 
+                WHERE owner = 'LOCB2'
+                ORDER BY table_name
+            """)
+            tables = [row[0] for row in cur.fetchall()]
+            
+            if not tables:
+                messagebox.showinfo("Thông tin", "Không tìm thấy bảng nào trong schema LOCB2!")
+                return
+            
+            # Hiển thị dialog chọn bảng
+            self._show_table_selector(tables)
+            
+        except Exception as e:
+            messagebox.showerror("Lỗi", f"Không thể lấy danh sách bảng:\n{e}")
+    
+    def _show_table_selector(self, tables):
+        """Hiển thị dialog chọn bảng"""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Chọn Bảng Để Export")
+        dlg.geometry("500x400")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        
+        # Header
+        header = tk.Label(
+            dlg,
+            text="Chọn Bảng Để Export Dữ Liệu",
+            font=("Arial", 12, "bold"),
+            bg="white",
+            fg="#2c3e50",
+            pady=10
+        )
+        header.pack()
+        
+        # Listbox với scrollbar
+        frame = tk.Frame(dlg)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        scrollbar = tk.Scrollbar(frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        listbox = tk.Listbox(
+            frame,
+            font=("Arial", 10),
+            yscrollcommand=scrollbar.set,
+            selectmode=tk.SINGLE
+        )
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=listbox.yview)
+        
+        # Thêm bảng vào listbox
+        for table in tables:
+            listbox.insert(tk.END, table)
+        
+        # Buttons
+        btn_frame = tk.Frame(dlg, bg="white")
+        btn_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        def on_export():
+            selection = listbox.curselection()
+            if not selection:
+                messagebox.showwarning("Cảnh báo", "Vui lòng chọn bảng!")
+                return
+            
+            table_name = listbox.get(selection[0])
+            dlg.destroy()
+            self._export_table_to_kyso(table_name)
+        
+        tk.Button(
+            btn_frame,
+            text="✅ Export",
+            command=on_export,
+            bg="#27ae60",
+            fg="white",
+            font=("Arial", 10, "bold"),
+            padx=20,
+            pady=8
+        ).pack(side=tk.LEFT, padx=5)
+        
+        tk.Button(
+            btn_frame,
+            text="❌ Hủy",
+            command=dlg.destroy,
+            bg="#e74c3c",
+            fg="white",
+            font=("Arial", 10, "bold"),
+            padx=20,
+            pady=8
+        ).pack(side=tk.RIGHT, padx=5)
+    
+    def _export_table_to_kyso(self, table_name):
+        """Export bảng ra file CSV trong thư mục Kyso"""
+        try:
+            # Tạo tên file
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{table_name}_{timestamp}.csv"
+            
+            # Lưu vào thư mục Kyso (cùng thư mục với appkyso.py)
+            kyso_dir = os.path.dirname(os.path.abspath(__file__))
+            filepath = os.path.join(kyso_dir, filename)
+            
+            # Export data
+            cur = self.db_conn.cursor()
+            cur.execute(f"SELECT * FROM LOCB2.{table_name}")
+            
+            # Lấy tên cột
+            columns = [desc[0] for desc in cur.description]
+            rows = cur.fetchall()
+            
+            if not rows:
+                messagebox.showinfo("Thông tin", f"Bảng {table_name} không có dữ liệu!")
+                return
+            
+            # Ghi file CSV
+            import csv
+            with open(filepath, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.writer(f)
+                writer.writerow(columns)
+                writer.writerows(rows)
+            
+            # Thêm vào danh sách uploaded_files
+            file_size = os.path.getsize(filepath)
+            file_info = {
+                'path': filepath,
+                'name': filename,
+                'size': file_size,
+                'extension': '.CSV',
+                'status': 'Chưa ký',
+                'upload_date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                'signed': False,
+                'signature': None,
+                'from_database': True
+            }
+            
+            self.uploaded_files.append(file_info)
+            self.update_file_list()
+            
+            messagebox.showinfo("Thành công", 
+                f"✓ Đã export {len(rows)} dòng từ bảng {table_name}\n"
+                f"✓ File: {filename}\n"
+                f"✓ Thư mục: {kyso_dir}")
+            
+        except Exception as e:
+            messagebox.showerror("Lỗi", f"Không thể export bảng:\n{e}")
     
     def update_file_list(self):
         """Cập nhật danh sách file"""

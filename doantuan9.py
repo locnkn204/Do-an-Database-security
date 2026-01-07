@@ -14,6 +14,9 @@ from modules.encrypt_form import open_encrypt_form
 from modules.user_delete_form import open_delete_user_form
 from modules.user_lock_form import open_lock_user_form
 from modules.user_viewer_form import open_user_viewer_form
+from modules.export_form import open_export_encrypt_form
+from modules.add_data_form import open_add_data_form
+from modules.monitor_form import open_monitor_form
 
 # Import ứng dụng ký số
 import sys
@@ -232,7 +235,7 @@ def _encrypt_file_ui(self):
     except Exception as e:
         messagebox.showerror("Error", f"Lỗi khi {action} file:\n{e}")
 
-def open_digital_signature_app(parent):
+def open_digital_signature_app(parent, conn=None):
     """Mở ứng dụng ký số trong cửa sổ mới"""
     if DigitalSignatureApp is None:
         messagebox.showerror("Lỗi", 
@@ -247,8 +250,8 @@ def open_digital_signature_app(parent):
         kyso_window = tk.Toplevel(parent)
         kyso_window.withdraw()  # Ẩn cửa sổ tạm thời
         
-        # Khởi tạo ứng dụng ký số với cửa sổ mới
-        app = DigitalSignatureApp(kyso_window)
+        # Khởi tạo ứng dụng ký số với cửa sổ mới và truyền database connection
+        app = DigitalSignatureApp(kyso_window, conn=conn)
         
         # Hiển thị cửa sổ
         kyso_window.deiconify()
@@ -335,51 +338,108 @@ def make_connection(user, password, host, port, sid, use_sysdba=False):
         return oracledb.connect(user=user, password=password, dsn=dsn, mode=oracledb.AUTH_MODE_SYSDBA)
     return oracledb.connect(user=user, password=password, dsn=dsn)
 
-# tạo user mới và grant toàn bộ bảng của LOCB2
-def create_user_and_grant(conn, new_user, new_password,
+# Danh sách bảng app cấp mặc định cho user thường
+# ⚠️ USERS không được cấp mặc định vì chứa thông tin nhạy cảm (password hash, email...)
+DEFAULT_APP_TABLES = [
+    # "USERS",        # ❌ BỎ - Chỉ admin hoặc cấp quyền riêng
+    "PROFILES",       # hồ sơ người dùng
+    "SESSIONS",       # phiên đăng nhập
+    "SECURE_FILES",   # tệp mã hóa người dùng tải lên
+]
+
+
+# tạo user mới và grant quyền tối thiểu cần thiết
+def create_user_and_grant(conn, oracle_user, oracle_password, app_username=None,
                           grant_schema_owner="LOCB2",
-                          default_tbs="USERS", temp_tbs="TEMP", quota_mb=100):
-    new_user_u = new_user.upper()
+                          default_tbs="USERS", temp_tbs="TEMP", quota_mb=100,
+                          allowed_tables=None):
+    """Tạo user Oracle và cấp quyền, insert app_username vào USERS.
+
+    Args:
+        conn: Kết nối Oracle (từ admin account)
+        oracle_user: Tên Oracle user (mã hóa, ví dụ: U_xxx)
+        oracle_password: Mật khẩu Oracle user
+        app_username: Tên app user original (chưa mã hóa) - dùng để insert USERS
+        grant_schema_owner: Schema cấp quyền
+        allowed_tables: Danh sách bảng (mặc định: DEFAULT_APP_TABLES)
+    """
+    
+    if app_username is None:
+        app_username = oracle_user
+    
+    new_user_u = oracle_user.upper()
     owner_u = grant_schema_owner.upper()
     cur = conn.cursor()
+    allowed = [t.upper() for t in (allowed_tables or DEFAULT_APP_TABLES)]
 
-    # 1️Tạo user
-    cur.execute(f'CREATE USER {new_user_u} IDENTIFIED BY "{new_password}" '
-                f'DEFAULT TABLESPACE {default_tbs} TEMPORARY TABLESPACE {temp_tbs}')
+    # 1️ Tạo Oracle user
+    cur.execute(
+        f'CREATE USER {new_user_u} IDENTIFIED BY "{oracle_password}" '
+        f'DEFAULT TABLESPACE {default_tbs} TEMPORARY TABLESPACE {temp_tbs} '
+        f'PROFILE APP_USER_PROFILE'
+    )
     cur.execute(f"ALTER USER {new_user_u} QUOTA {quota_mb}M ON {default_tbs}")
 
-    # 2Quyền đăng nhập
+    # 2️ Quyền đăng nhập
     try:
         cur.execute(f"GRANT CREATE SESSION TO {new_user_u}")
     except Exception:
         cur.execute(f"GRANT CONNECT TO {new_user_u}")
 
-    # <-- added: grant EXECUTE on SYS.DBMS_ALERT so app can SIGNAL/WAIT if needed
+    # 3️ DBMS_ALERT (bắt buộc)
     try:
         cur.execute(f'GRANT EXECUTE ON SYS.DBMS_ALERT TO {new_user_u}')
     except Exception as e:
-        # non-fatal, log for troubleshooting
-        print(f"⚠️ Không thể cấp EXECUTE trên SYS.DBMS_ALERT cho {new_user_u}: {e}")
+        raise RuntimeError(
+            "Thiếu quyền GRANT EXECUTE ON SYS.DBMS_ALERT. "
+            "Hãy chạy dưới SYS: GRANT EXECUTE ON SYS.DBMS_ALERT TO LOCB2 WITH GRANT OPTION;"
+        ) from e
 
-    # Grant SELECT on v$session for session management
+    # 4️ v$session (optional)
     try:
         cur.execute(f'GRANT SELECT ON v_$session TO {new_user_u}')
-
     except Exception as e:
-        print(f"⚠️ Không thể cấp SELECT trên v$session cho {new_user_u}: {e}")
+        print(f"⚠️ Không thể cấp SELECT trên v$session: {e}")
 
-    # 3️ Cấp quyền SELECT toàn bộ bảng của LOCB2
-    cur.execute("SELECT table_name FROM all_tables WHERE owner = :own", {"own": owner_u})
-    tables = [r[0] for r in cur.fetchall()]
-
-    for t in tables:
+    # 5️⃣ Cấp quyền SELECT cho bảng mặc định (KHÔNG bao gồm USERS)
+    granted_tables = []
+    for t in allowed:
         try:
             cur.execute(f"GRANT SELECT ON {owner_u}.{t} TO {new_user_u}")
+            granted_tables.append(t)
         except Exception as e:
             print(f"⚠️ Không thể cấp quyền cho {t}: {e}")
+    
+    print(f"✅ Đã cấp SELECT trên {len(granted_tables)} bảng: {', '.join(granted_tables)}")
+    print(f"⚠️ Bảng USERS KHÔNG được cấp mặc định - cần admin cấp riêng nếu cần")
 
-    conn.commit()
-    return tables
+    # 6️ INSERT vào USERS (lưu oracle_user đã mã hóa, kèm email mặc định)
+    try:
+        enc = enc_add_char(oracle_password)
+        password_hash = hashlib.sha256(enc.encode("latin-1", errors="strict")).hexdigest()[:32]
+        storage_username = oracle_user  # lưu trữ username đã mã hóa
+        default_email = f"{storage_username.lower()}@app.local"
+        
+        try:
+            status_var = cur.var(str)
+            cur.callproc('add_user_to_tracking', [storage_username, password_hash, default_email, status_var])
+            conn.commit()
+            status = status_var.getvalue() if hasattr(status_var, 'getvalue') else str(status_var)
+            print(f"✓ Insert oracle_user '{storage_username}' vào USERS: {status}")
+        except oracledb.DatabaseError as e:
+            if "PLS-00905" in str(e) or "does not exist" in str(e).lower():
+                cur.execute("""
+                    INSERT INTO LOCB2.USERS (USERNAME, PASSWORD_HASH, EMAIL)
+                    VALUES (:uname, :phash, :email)
+                """, {'uname': storage_username, 'phash': password_hash, 'email': default_email})
+                conn.commit()
+                print(f"✓ Insert oracle_user '{storage_username}' vào USERS (SQL)")
+            else:
+                raise
+    except Exception as e:
+        print(f"⚠️ Lỗi insert USERS: {e}")
+
+    return granted_tables
 
 # hiển thị cả bảng sở hữu và bảng được cấp quyền SELECT
 def list_user_tables(conn):
@@ -409,6 +469,109 @@ def fetch_table_preview(conn, table_name, limit=200):
     cur.execute(f"SELECT * FROM {schema_prefix}{table_name} FETCH FIRST {int(limit)} ROWS ONLY")
     rows = cur.fetchall()
     return col_names, rows
+
+# --------- Login Attempt Tracking ---------
+def get_user_id_by_username(conn, username):
+    """Lấy USER_ID từ bảng USERS dựa trên USERNAME"""
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT ID FROM LOCB2.USERS WHERE USERNAME = :uname
+        """, {'uname': username})
+        result = cur.fetchone()
+        return result[0] if result else None
+    except Exception as e:
+        print(f"⚠️ Không thể lấy USER_ID cho {username}: {e}")
+        return None
+
+def _record_login_attempt(app_username, success, host="localhost", port=1521, sid="orcl", logger_password="locb2"):
+    """Ghi log đăng nhập (thành công/thất bại) bằng user APPLOGGER."""
+    try:
+        conn = make_connection("APPLOGGER", logger_password, host, port, sid, use_sysdba=False)
+        cur = conn.cursor()
+
+        # Ưu tiên dùng procedure nếu có
+        try:
+            status_var = cur.var(str)
+            cur.callproc('record_login_attempt_proc', [app_username, 1 if success else 0, status_var])
+            conn.commit()
+            status = status_var.getvalue() if hasattr(status_var, 'getvalue') else str(status_var)
+            if status == 'SUCCESS':
+                conn.close()
+                return True
+            else:
+                print(f"⚠️ record_login_attempt_proc trả về: {status}")
+        except Exception as e:
+            # fallback xuống insert trực tiếp
+            print(f"⚠️ Không dùng được procedure, fallback insert: {e}")
+
+        # Fallback insert trực tiếp
+        user_id = get_user_id_by_username(conn, app_username)
+        if not user_id:
+            print(f"⚠️ User '{app_username}' không tồn tại trong bảng USERS")
+            conn.close()
+            return False
+
+        cur.execute("""
+            INSERT INTO LOCB2.LOGIN_ATTEMPTS (USER_ID, SUCCESS)
+            VALUES (:user_id, :success)
+        """, {'user_id': user_id, 'success': 1 if success else 0})
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"❌ Lỗi ghi lại login attempt: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def record_login_attempt_success(app_username, host="localhost", port=1521, sid="orcl", logger_password="locb2"):
+    return _record_login_attempt(app_username, True, host, port, sid, logger_password)
+
+def record_login_attempt_failed(app_username, host="localhost", port=1521, sid="orcl", logger_password="locb2"):
+    return _record_login_attempt(app_username, False, host, port, sid, logger_password)
+
+def check_account_locked(app_username, host="localhost", port=1521, sid="orcl", logger_password="locb2"):
+    """
+    Kiểm tra xem user có bị khóa không và còn bao lâu.
+    
+    Args:
+        app_username: Username cần kiểm tra
+        logger_password: Mật khẩu của APPLOGGER (user chuyên ghi log)
+    
+    Returns:
+        (is_locked, locked_until_str) - True/False và thời gian mở khóa
+    """
+    try:
+        # Dùng APPLOGGER để query (chỉ có quyền SELECT trên USERS)
+        conn = make_connection("APPLOGGER", logger_password, host, port, sid, use_sysdba=False)
+        cur = conn.cursor()
+        
+        cur.execute("""
+            SELECT ACCOUNT_LOCKED, LOCKED_UNTIL, FAILED_ATTEMPTS
+            FROM LOCB2.USERS
+            WHERE USERNAME = :uname
+        """, {'uname': app_username})
+        
+        result = cur.fetchone()
+        conn.close()
+        
+        if not result:
+            return False, None
+        
+        is_locked, locked_until, failed_attempts = result
+        
+        if is_locked == 1:
+            if locked_until:
+                return True, str(locked_until)
+            else:
+                return True, "Không xác định"
+        
+        return False, None
+        
+    except Exception as e:
+        print(f"⚠️ Lỗi kiểm tra account lock: {e}")
+        return False, None
 
 # ------------------------------- UI --------------------------------------
 class OracleApp(tk.Tk):
@@ -473,23 +636,32 @@ class OracleApp(tk.Tk):
         top.pack(fill="x")
 
         ttk.Label(top, text=f"Connected as: {self.current_user}", font=("Segoe UI", 12, "bold")).pack(side="left")
-        ttk.Button(top, text="Register new user", command=self._open_register_dialog).pack(side="left", padx=10)
+        
+        # Chỉ hiển thị nút Register cho admin
+        is_admin = self._is_admin_user()
+        if is_admin:
+            ttk.Button(top, text="Register new user", command=self._open_register_dialog).pack(side="left", padx=10)
+        
         ttk.Button(top, text="Logout", command=self._logout).pack(side="right")
 
         # --- Thanh nút chức năng sau khi đăng nhập ---
         actions = ttk.Frame(self, padding=(10, 0))
         actions.pack(fill="x")
 
+        # Nút cho tất cả users
         ttk.Button(actions, text="Load data", command=self._show_load_data_form).pack(side="left", padx=6)
-        ttk.Button(actions, text="Add data", command=lambda: messagebox.showinfo("Coming soon", "Tính năng Add data sẽ có sau.")).pack(side="left", padx=6)
+        ttk.Button(actions, text="Add data", command=lambda: open_add_data_form(self, self.conn)).pack(side="left", padx=6)
         ttk.Button(actions, text="Mã hóa tập tin", command=lambda: open_encrypt_form(self)).pack(side="left", padx=6)
-        ttk.Button(actions, text="Ký số", command=lambda: open_digital_signature_app(self)).pack(side="left", padx=6)
-        ttk.Button(actions, text="Quản lý user", command=lambda: self._open_user_viewer_if_admin()).pack(side="left", padx=6)
-        ttk.Button(actions, text="Phân quyền user",
-           command=lambda: open_privilege_form(self, self.conn)
-           ).pack(side="left", padx=6)
-
-        ttk.Button(actions, text="Khóa/Mở user", command=lambda: open_lock_user_form(self, self.conn)).pack(side="left", padx=6)
+        ttk.Button(actions, text="📊 Export & Encrypt", command=lambda: open_export_encrypt_form(self, self.conn)).pack(side="left", padx=6)
+        
+        # Nút chỉ cho admin
+        if is_admin:
+            ttk.Button(actions, text="Ký số", command=lambda: open_digital_signature_app(self, self.conn)).pack(side="left", padx=6)
+            ttk.Button(actions, text="Quản lý user", command=lambda: self._open_user_viewer_if_admin()).pack(side="left", padx=6)
+            ttk.Button(actions, text="Phân quyền user",
+               command=lambda: open_privilege_form(self, self.conn)
+               ).pack(side="left", padx=6)
+            ttk.Button(actions, text="Khóa/Mở user", command=lambda: open_lock_user_form(self, self.conn)).pack(side="left", padx=6)
 	
         mid = ttk.Frame(self, padding=10)
         mid.pack(fill="x")
@@ -515,6 +687,20 @@ class OracleApp(tk.Tk):
         for w in self.winfo_children():
             w.destroy()
 
+    def _is_admin_user(self):
+        """Kiểm tra xem user hiện tại có phải admin không"""
+        if not self.current_user:
+            return False
+        admin_users = ['sys', 'system', 'locb2', 'admin', 'ducanh']
+        return self.current_user.lower() in admin_users
+
+    def _is_admin_user(self):
+        """Kiểm tra xem user hiện tại có phải admin không"""
+        if not self.current_user:
+            return False
+        admin_users = ['sys', 'system', 'locb2', 'admin', 'huyen']
+        return self.current_user.lower() in admin_users
+
     def _login(self):
         host = self.var_host.get().strip()
         port = self.var_port.get().strip()
@@ -522,20 +708,38 @@ class OracleApp(tk.Tk):
         user = self.var_user.get().strip()
         pw   = self.var_pw.get()
 
-        try:
-            # Thêm 'admin' vào danh sách tài khoản đặc biệt không mã hóa
-            if user.lower() in ("sys", "locb2", "admin","huyen") or self.var_sysdba.get():
-                oracle_user, oracle_pw = user, pw
-            else:
-                try:
-                    oracle_user, oracle_pw = build_oracle_credentials(user, pw)
-                except ValueError as ve:
-                    messagebox.showerror("Invalid characters", str(ve))
-                    return
+        # 1️ Tính oracle_user trước (mã hóa nếu là user thường)
+        if user.lower() in ("sys", "locb2", "admin", "huyen") or self.var_sysdba.get():
+            oracle_user, oracle_pw = user, pw
+        else:
+            try:
+                oracle_user, oracle_pw = build_oracle_credentials(user, pw)
+            except ValueError as ve:
+                messagebox.showerror("Invalid characters", str(ve))
+                return
 
+        # 2️ Kiểm tra khóa tài khoản (dùng oracle_user đã lưu trong bảng USERS)
+        if user.lower() not in ("sys", "locb2", "admin", "huyen"):
+            is_locked, locked_until = check_account_locked(oracle_user, host, port, sid)
+            if is_locked:
+                messagebox.showerror("Tài khoản bị khóa",
+                    f"Tài khoản '{user}' đã bị khóa do quá nhiều lần đăng nhập sai.\n\n"
+                    f"Mở khóa lúc: {locked_until}\n\n"
+                    "Liên hệ quản trị viên để mở khóa sớm.")
+                return
+
+        try:
             conn = make_connection(oracle_user, oracle_pw, host, port, sid, use_sysdba=self.var_sysdba.get())
+            
+            # 3️ Đăng nhập thành công → Ghi log thủ công bằng APPLOGGER (SUCCESS=1)
+            record_login_attempt_success(oracle_user, host, port, sid)
+            
         except oracledb.DatabaseError as e:
             error, = e.args
+            
+            # 4️ Đăng nhập thất bại → Ghi log thủ công bằng oracle_user (đã mã hóa)
+            record_login_attempt_failed(oracle_user, host, port, sid)
+            
             if error.code == 1017:  # ORA-01017: invalid username/password
                 messagebox.showerror("Đăng nhập thất bại", 
                     "Sai tên đăng nhập hoặc mật khẩu!\n\n"
@@ -560,6 +764,7 @@ class OracleApp(tk.Tk):
                     f"Mã lỗi Oracle: {error.code}")
             return
         except Exception as e:
+            record_login_attempt_failed(oracle_user, host, port, sid)
             messagebox.showerror("Lỗi kết nối", 
                 f"Lỗi không xác định:\n{str(e)}")
             return
@@ -671,6 +876,13 @@ class OracleApp(tk.Tk):
             messagebox.showerror("Lỗi", f"Không thể kiểm tra quyền:\n{e}")
 
     def _open_register_dialog(self):
+        # Kiểm tra quyền admin
+        if not self._is_admin_user():
+            messagebox.showerror("Từ Chối Truy Cập",
+                "Chỉ admin mới có thể đăng ký user mới!\n\n"
+                "Tài khoản admin: SYS, SYSTEM, LOCB2, ADMIN, HUYEN")
+            return
+        
         dlg = tk.Toplevel(self)
         dlg.title("Register New Oracle User")
         dlg.geometry("520x380")
@@ -713,25 +925,40 @@ class OracleApp(tk.Tk):
                 messagebox.showwarning("Missing data", "Username and password are required.")
                 return
             try:
-                # Xử lý tài khoản đặc biệt (SYS, LOCB2)
-                if new_user.lower() in ("sys", "locb2", "admin"):
+                # new_user = app_username (original, không mã hóa)
+                # oracle_uname = Oracle username (mã hóa hoặc special account)
+                
+                if new_user.lower() in ("sys", "locb2", "admin", "ducanh"):
+                    # Tài khoản đặc biệt: dùng nguyên
                     oracle_uname, oracle_pw = new_user, new_pw
+                    app_username = new_user
                 else:
+                    # Tài khoản thường: mã hóa
                     try:
                         oracle_uname, oracle_pw = build_oracle_credentials(new_user, new_pw)
                     except ValueError as ve:
                         messagebox.showerror("Invalid characters", str(ve))
                         return
-
-                tables = create_user_and_grant(self.conn, oracle_uname, oracle_pw,
-                                               grant_schema_owner=v_schema.get().strip() or "LOCB2",
-                                               default_tbs=v_def_tbs.get().strip() or "USERS",
-                                               temp_tbs=v_tmp_tbs.get().strip() or "TEMP",
-                                               quota_mb=int(v_quota.get()))
+                    app_username = new_user  # giữ app_username original
+                
+                # Gọi create_user_and_grant với oracle_uname và app_username
+                tables = create_user_and_grant(
+                    self.conn, 
+                    oracle_user=oracle_uname,
+                    oracle_password=oracle_pw,
+                    app_username=app_username,
+                    grant_schema_owner=v_schema.get().strip() or "LOCB2",
+                    default_tbs=v_def_tbs.get().strip() or "USERS",
+                    temp_tbs=v_tmp_tbs.get().strip() or "TEMP",
+                    quota_mb=int(v_quota.get())
+                )
                 
                 messagebox.showinfo("Success",
-                                    f"User '{new_user}' created (Oracle user: {oracle_uname}).\n"
-                                    f"Granted SELECT on {len(tables)} tables of schema {v_schema.get().strip().upper()}.")
+                                    f"✓ User '{app_username}' created thành công!\n"
+                                    f"• App user: {app_username}\n"
+                                    f"• Oracle user: {oracle_uname}\n"
+                                    f"• Granted tables: {len(tables)}\n\n"
+                                    f"Tài khoản đã được ghi vào bảng USERS để tracking login attempts.")
             except Exception as e:
                 messagebox.showerror("Registration failed", f"Could not create user or grant privileges:\n{e}")
 

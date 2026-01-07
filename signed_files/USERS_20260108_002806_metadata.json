@@ -1,0 +1,7 @@
+{
+  "original_file": "USERS_20260108_002806.csv",
+  "signed_file": "USERS_20260108_002806_signed.csv",
+  "signature": "THtwEhjaaHolUIBZFV3SozF/356OUs0dB7h9G2umpAwnGr4+M6a23yLRvd3Mp5LOVA40vsbYZeCFZquc8QJ86WPOtZxsHQdPiRNIZcZ4huAMDTNgsW/ag7mkTSRggwNId49kZ0yZ62w0lsb3Bh0G31pwR9njR7m2puQu/n+rLmM53CHdD9Gedwx4kE2FVvTozW9Kh+/7zKjG6W4nX7Lk63jJA5XEMexkJAoPiVobvtXQzE+pjzSqQa5SafWlziB5l4g1lzvfvP0LAelPgumu01bcb3Wy6QS3p21G7ub22lMAdonHvDz2TfZ7+gzBg6RlxU1RnfPyy9Djc09L49aa5A==",
+  "signature_info": "Người ký: Loc\nNgày ký: 2026-01-08 00:28:16\nThuật toán: SHA256 với RSA-PSS",
+  "sign_date": "2026-01-08T00:28:16.819159"
+}

@@ -9,6 +9,8 @@ from tkinter import ttk, messagebox
 import threading
 import time
 
+from modules.monitor_form import open_monitor_form
+
 try:
     import oracledb
 except ImportError:
@@ -208,7 +210,7 @@ def kick_user_by_username(conn, target_username):
                     print(f"❌ Lỗi kill {sid}: {e}")
 
         conn.commit()
-        return len(sessions), f"Đã gửi lệnh đăng xuất tới user {target_username}.\nĐã kill cưỡng chế {kill_count} session cứng đầu."
+        return len(sessions), f"Đã gửi lệnh đăng xuất tới user {target_username}.\nĐã kill cưỡng chế {kill_count} session."
 
     except Exception as e:
         print(f"❌ Lỗi kick_user_by_username: {e}")
@@ -355,7 +357,9 @@ class UserViewerForm:
         ttk.Label(header, text="📊 Quản Lý Người Dùng", 
                  font=("Segoe UI", 14, "bold")).pack(side="left")
         
-        # Nút refresh
+        # Nút giám sát và refresh
+        ttk.Button(header, text="👀 Giám sát hệ thống", 
+                  command=lambda: open_monitor_form(self.window, self.conn)).pack(side="right", padx=5)
         ttk.Button(header, text="🔄 Refresh", 
                   command=self._refresh_all).pack(side="right", padx=5)
         
@@ -524,12 +528,12 @@ class UserViewerForm:
         vsb.config(command=self.details_tree.yview)
         
         self.details_tree.heading("Table", text="Bảng")
-        self.details_tree.heading("Privilege", text="Quyền")
+        self.details_tree.heading("Privilege", text="Quyền (Nhiều quyền)")
         self.details_tree.heading("Grantable", text="Có Thể Grant")
         
         self.details_tree.column("Table", width=200)
-        self.details_tree.column("Privilege", width=150)
-        self.details_tree.column("Grantable", width=100)
+        self.details_tree.column("Privilege", width=300)  # Tăng độ rộng để hiển thị nhiều quyền
+        self.details_tree.column("Grantable", width=120)
         
         self.details_tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
@@ -614,13 +618,29 @@ class UserViewerForm:
                     self.details_info.config(
                         text=f"❌ User '{username}' không có quyền truy cập nào trên schema LOCB2")
                 else:
-                    self.details_info.config(
-                        text=f"✅ Tìm thấy {len(privileges)} quyền cho user '{username}'")
+                    # Gộp quyền theo bảng
+                    table_privs = {}  # {table_name: [privileges]}
+                    table_grantable = {}  # {table_name: has_grantable}
                     
                     for table, privilege, grantable in privileges:
-                        grantable_text = "YES" if grantable == "YES" else "NO"
+                        if table not in table_privs:
+                            table_privs[table] = []
+                            table_grantable[table] = False
+                        table_privs[table].append(privilege)
+                        if grantable == "YES":
+                            table_grantable[table] = True
+                    
+                    # Hiển thị
+                    total_privs = len(privileges)
+                    self.details_info.config(
+                        text=f"✅ Tìm thấy {total_privs} quyền trên {len(table_privs)} bảng cho user '{username}'")
+                    
+                    # Insert theo bảng (gộp quyền)
+                    for table in sorted(table_privs.keys()):
+                        privs_str = ", ".join(sorted(table_privs[table]))
+                        grantable_text = "YES" if table_grantable[table] else "NO"
                         self.details_tree.insert("", "end", 
-                                               values=(table, privilege, grantable_text))
+                                               values=(table, privs_str, grantable_text))
             
             try:
                 self.window.after(0, _update_ui)
@@ -645,8 +665,8 @@ class UserViewerForm:
         # Cảnh báo rõ ràng cho Admin
         confirm = messagebox.askyesno(
             "Xác nhận Logout",
-            f"Bạn có muốn ĐÁ (Logout) user '{target_username}' không?\n\n"
-            f"⚠️ LƯU Ý: Hành động này sẽ ngắt kết nối TẤT CẢ các thiết bị\n"
+            f"Bạn có muốn (Logout) user '{target_username}' không?\n\n"
+            f" LƯU Ý: Hành động này sẽ ngắt kết nối TẤT CẢ các thiết bị\n"
             f"mà user '{target_username}' đang đăng nhập!"
         )
         
